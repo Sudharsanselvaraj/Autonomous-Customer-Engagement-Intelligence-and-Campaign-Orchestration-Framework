@@ -33,9 +33,9 @@ class Settings(BaseSettings):
     CELERY_BROKER_URL: str = "redis://localhost:6379/1"
     CELERY_RESULT_BACKEND: str = "redis://localhost:6379/2"
 
-    # Services
-    CHANNEL_SIMULATOR_URL: str = "http://localhost:8001"
-    CRM_RECEIPT_URL: str = "http://localhost:8000"
+    # Services — Railway uses .railway.internal hostnames
+    CHANNEL_SIMULATOR_URL: str = "http://channel-simulator.railway.internal:8000"
+    CRM_RECEIPT_URL: str = "http://crm-api.railway.internal:8000"
 
     # AI — primary (Groq)
     OPENROUTER_API_KEY: str = ""
