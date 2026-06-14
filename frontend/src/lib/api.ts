@@ -1,6 +1,8 @@
 import axios from "axios";
 
-const BASE = process.env.NEXT_PUBLIC_API_URL || "http://localhost:8000";
+// Use relative URLs when deployed (nginx proxies /api/ to backend)
+// Use absolute URL for local development
+const BASE = process.env.NEXT_PUBLIC_API_URL || "";
 
 export const api = axios.create({
   baseURL: BASE,
