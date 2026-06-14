@@ -1,0 +1,148 @@
+version: "3.8"
+
+services:
+  # ── PostgreSQL ─────────────────────────────────────────────────────────────
+  postgres:
+    build:
+      context: ./infra/postgres
+      dockerfile: Dockerfile
+    container_name: astercrm-postgres
+    environment:
+      POSTGRES_DB: ceip_crm
+      POSTGRES_USER: crm_user
+      POSTGRES_PASSWORD: crm_password_2024
+    volumes:
+      - postgres_data:/var/lib/postgresql/data
+    networks:
+      - astercrm
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD-SHELL", "pg_isready -U crm_user -d ceip_crm"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── Redis ──────────────────────────────────────────────────────────────────
+  redis:
+    build:
+      context: ./infra/redis
+      dockerfile: Dockerfile
+    container_name: astercrm-redis
+    volumes:
+      - redis_data:/data
+    networks:
+      - astercrm
+    restart: unless-stopped
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 10s
+      timeout: 5s
+      retries: 5
+
+  # ── CRM API ────────────────────────────────────────────────────────────────
+  crm-api:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile
+    container_name: astercrm-api
+    environment:
+      - ENVIRONMENT=production
+      - DATABASE_URL=postgresql://crm_user:crm_password_2024@postgres:5432/ceip_crm
+      - REDIS_URL=redis://redis:6379/0
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - CHANNEL_SIMULATOR_URL=http://channel-simulator:8000
+      - CRM_RECEIPT_URL=http://crm-api:8000
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+      - SECRET_KEY=${SECRET_KEY:-supersecretkey-change-in-production-32chars}
+    ports:
+      - "8000:8000"
+    depends_on:
+      postgres:
+        condition: service_healthy
+      redis:
+        condition: service_healthy
+    networks:
+      - astercrm
+    restart: unless-stopped
+
+  # ── CRM Worker ─────────────────────────────────────────────────────────────
+  crm-worker:
+    build:
+      context: ./backend
+      dockerfile: Dockerfile.worker
+    container_name: astercrm-worker
+    environment:
+      - ENVIRONMENT=production
+      - DATABASE_URL=postgresql://crm_user:crm_password_2024@postgres:5432/ceip_crm
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - CHANNEL_SIMULATOR_URL=http://channel-simulator:8000
+      - CRM_RECEIPT_URL=http://crm-api:8000
+      - OPENROUTER_API_KEY=${OPENROUTER_API_KEY}
+      - GEMINI_API_KEY=${GEMINI_API_KEY}
+    depends_on:
+      - redis
+      - postgres
+    networks:
+      - astercrm
+    restart: unless-stopped
+
+  # ── Channel Simulator ──────────────────────────────────────────────────────
+  channel-simulator:
+    build:
+      context: ./channel-simulator
+      dockerfile: Dockerfile
+    container_name: astercrm-channel
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - CRM_RECEIPT_URL=http://crm-api:8000
+    ports:
+      - "8001:8000"
+    depends_on:
+      - redis
+    networks:
+      - astercrm
+    restart: unless-stopped
+
+  # ── Channel Worker ───────────────────────────────────────────────────────────
+  channel-worker:
+    build:
+      context: ./channel-simulator
+      dockerfile: Dockerfile.worker
+    container_name: astercrm-channel-worker
+    environment:
+      - CELERY_BROKER_URL=redis://redis:6379/1
+      - CELERY_RESULT_BACKEND=redis://redis:6379/2
+      - CRM_RECEIPT_URL=http://crm-api:8000
+    depends_on:
+      - redis
+    networks:
+      - astercrm
+    restart: unless-stopped
+
+  # ── Frontend (nginx with API proxy) ─────────────────────────────────────────
+  frontend:
+    build:
+      context: ./frontend
+      dockerfile: Dockerfile.vps
+    container_name: astercrm-frontend
+    environment:
+      - API_HOST=crm-api:8000
+    ports:
+      - "80:80"
+    depends_on:
+      - crm-api
+    networks:
+      - astercrm
+    restart: unless-stopped
+
+volumes:
+  postgres_data:
+  redis_data:
+
+networks:
+  astercrm:
+    driver: bridge
