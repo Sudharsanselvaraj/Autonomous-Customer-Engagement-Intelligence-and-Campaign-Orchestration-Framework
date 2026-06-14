@@ -1,9 +1,9 @@
 services:
-  # ── PostgreSQL (managed by Render) ───────────────────────────────────────────
+  # ── PostgreSQL (Render Native) ───────────────────────────────────────────────
   - type: pserv
     name: aster-crm-postgres
     runtime: docker
-    repo: https://github.com/sudharsanselva/aster-crm
+    repo: https://github.com/sudharsanselvaraj/AI-Native-Customer-Intelligence-Segmentation-and-Campaign-Orchestration-System
     branch: main
     dockerfilePath: ./infra/postgres/Dockerfile
     envVars:
@@ -18,11 +18,11 @@ services:
       mountPath: /var/lib/postgresql/data
       sizeGB: 10
 
-  # ── Redis (managed by Render) ─────────────────────────────────────────────
+  # ── Redis (Render Native) ──────────────────────────────────────────────────
   - type: pserv
     name: aster-crm-redis
     runtime: docker
-    repo: https://github.com/sudharsanselva/aster-crm
+    repo: https://github.com/sudharsanselvaraj/AI-Native-Customer-Intelligence-Segmentation-and-Campaign-Orchestration-System
     branch: main
     dockerfilePath: ./infra/redis/Dockerfile
     disk:
@@ -34,7 +34,7 @@ services:
   - type: web
     name: aster-crm-api
     runtime: docker
-    repo: https://github.com/sudharsanselva/aster-crm
+    repo: https://github.com/sudharsanselvaraj/AI-Native-Customer-Intelligence-Segmentation-and-Campaign-Orchestration-System
     branch: main
     dockerfilePath: ./backend/Dockerfile
     envVars:
@@ -83,7 +83,7 @@ services:
   - type: worker
     name: aster-crm-worker
     runtime: docker
-    repo: https://github.com/sudharsanselva/aster-crm
+    repo: https://github.com/sudharsanselvaraj/AI-Native-Customer-Intelligence-Segmentation-and-Campaign-Orchestration-System
     branch: main
     dockerfilePath: ./backend/Dockerfile.worker
     envVars:
@@ -124,7 +124,7 @@ services:
   - type: web
     name: aster-crm-channel
     runtime: docker
-    repo: https://github.com/sudharsanselva/aster-crm
+    repo: https://github.com/sudharsanselvaraj/AI-Native-Customer-Intelligence-Segmentation-and-Campaign-Orchestration-System
     branch: main
     dockerfilePath: ./channel-simulator/Dockerfile
     envVars:
@@ -150,7 +150,7 @@ services:
   - type: worker
     name: aster-crm-channel-worker
     runtime: docker
-    repo: https://github.com/sudharsanselva/aster-crm
+    repo: https://github.com/sudharsanselvaraj/AI-Native-Customer-Intelligence-Segmentation-and-Campaign-Orchestration-System
     branch: main
     dockerfilePath: ./channel-simulator/Dockerfile.worker
     envVars:
@@ -171,15 +171,18 @@ services:
           property: url
     numInstances: 1
 
-  # ── Frontend (Static Site) ───────────────────────────────────────────────────
-  - type: static
+  # ── Frontend (Web Service with nginx) ──────────────────────────────────────────
+  - type: web
     name: aster-crm-frontend
-    runtime: static
-    buildCommand: cd frontend && npm install --legacy-peer-deps && npm run build
-    publishPath: ./frontend/dist
+    runtime: docker
+    repo: https://github.com/sudharsanselvaraj/AI-Native-Customer-Intelligence-Segmentation-and-Campaign-Orchestration-System
+    branch: main
+    dockerfilePath: ./frontend/Dockerfile
     envVars:
       - key: NEXT_PUBLIC_API_URL
         fromService:
           name: aster-crm-api
           type: web
           property: url
+    healthCheckPath: /
+    numInstances: 1
