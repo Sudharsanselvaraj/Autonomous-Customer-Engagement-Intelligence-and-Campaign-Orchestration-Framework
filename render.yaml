@@ -1,0 +1,185 @@
+services:
+  # ── PostgreSQL (managed by Render) ───────────────────────────────────────────
+  - type: pserv
+    name: aster-crm-postgres
+    runtime: docker
+    repo: https://github.com/sudharsanselva/aster-crm
+    branch: main
+    dockerfilePath: ./infra/postgres/Dockerfile
+    envVars:
+      - key: POSTGRES_DB
+        value: ceip_crm
+      - key: POSTGRES_USER
+        generateValue: true
+      - key: POSTGRES_PASSWORD
+        generateValue: true
+    disk:
+      name: postgres-data
+      mountPath: /var/lib/postgresql/data
+      sizeGB: 10
+
+  # ── Redis (managed by Render) ─────────────────────────────────────────────
+  - type: pserv
+    name: aster-crm-redis
+    runtime: docker
+    repo: https://github.com/sudharsanselva/aster-crm
+    branch: main
+    dockerfilePath: ./infra/redis/Dockerfile
+    disk:
+      name: redis-data
+      mountPath: /data
+      sizeGB: 1
+
+  # ── CRM API ────────────────────────────────────────────────────────────────
+  - type: web
+    name: aster-crm-api
+    runtime: docker
+    repo: https://github.com/sudharsanselva/aster-crm
+    branch: main
+    dockerfilePath: ./backend/Dockerfile
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromService:
+          name: aster-crm-postgres
+          type: pserv
+          property: connectionString
+      - key: REDIS_URL
+        fromService:
+          name: aster-crm-redis
+          type: pserv
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: aster-crm-redis
+          type: pserv
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          name: aster-crm-redis
+          type: pserv
+          property: connectionString
+      - key: CHANNEL_SIMULATOR_URL
+        fromService:
+          name: aster-crm-channel
+          type: web
+          property: url
+      - key: CRM_RECEIPT_URL
+        fromService:
+          name: aster-crm-api
+          type: web
+          property: url
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+      - key: SECRET_KEY
+        generateValue: true
+    healthCheckPath: /health
+    numInstances: 1
+
+  # ── CRM Worker ───────────────────────────────────────────────────────────────
+  - type: worker
+    name: aster-crm-worker
+    runtime: docker
+    repo: https://github.com/sudharsanselva/aster-crm
+    branch: main
+    dockerfilePath: ./backend/Dockerfile.worker
+    envVars:
+      - key: ENVIRONMENT
+        value: production
+      - key: DATABASE_URL
+        fromService:
+          name: aster-crm-postgres
+          type: pserv
+          property: connectionString
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: aster-crm-redis
+          type: pserv
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          name: aster-crm-redis
+          type: pserv
+          property: connectionString
+      - key: CHANNEL_SIMULATOR_URL
+        fromService:
+          name: aster-crm-channel
+          type: web
+          property: url
+      - key: CRM_RECEIPT_URL
+        fromService:
+          name: aster-crm-api
+          type: web
+          property: url
+      - key: OPENROUTER_API_KEY
+        sync: false
+      - key: GEMINI_API_KEY
+        sync: false
+    numInstances: 1
+
+  # ── Channel Simulator ────────────────────────────────────────────────────────
+  - type: web
+    name: aster-crm-channel
+    runtime: docker
+    repo: https://github.com/sudharsanselva/aster-crm
+    branch: main
+    dockerfilePath: ./channel-simulator/Dockerfile
+    envVars:
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: aster-crm-redis
+          type: pserv
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          name: aster-crm-redis
+          type: pserv
+          property: connectionString
+      - key: CRM_RECEIPT_URL
+        fromService:
+          name: aster-crm-api
+          type: web
+          property: url
+    healthCheckPath: /health
+    numInstances: 1
+
+  # ── Channel Worker ───────────────────────────────────────────────────────────
+  - type: worker
+    name: aster-crm-channel-worker
+    runtime: docker
+    repo: https://github.com/sudharsanselva/aster-crm
+    branch: main
+    dockerfilePath: ./channel-simulator/Dockerfile.worker
+    envVars:
+      - key: CELERY_BROKER_URL
+        fromService:
+          name: aster-crm-redis
+          type: pserv
+          property: connectionString
+      - key: CELERY_RESULT_BACKEND
+        fromService:
+          name: aster-crm-redis
+          type: pserv
+          property: connectionString
+      - key: CRM_RECEIPT_URL
+        fromService:
+          name: aster-crm-api
+          type: web
+          property: url
+    numInstances: 1
+
+  # ── Frontend (Static Site) ───────────────────────────────────────────────────
+  - type: static
+    name: aster-crm-frontend
+    runtime: static
+    buildCommand: cd frontend && npm install --legacy-peer-deps && npm run build
+    publishPath: ./frontend/dist
+    envVars:
+      - key: NEXT_PUBLIC_API_URL
+        fromService:
+          name: aster-crm-api
+          type: web
+          property: url

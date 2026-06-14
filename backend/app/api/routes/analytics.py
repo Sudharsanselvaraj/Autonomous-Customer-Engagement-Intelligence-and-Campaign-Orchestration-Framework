@@ -1,4 +1,4 @@
-from fastapi import APIRouter, Depends
+from fastapi import APIRouter, Depends, BackgroundTasks
 from sqlalchemy.orm import Session
 from typing import List, Dict, Any
 
@@ -15,6 +15,19 @@ router = APIRouter()
 @router.get("/dashboard", response_model=DashboardStatsResponse)
 def get_dashboard(db: Session = Depends(get_db)):
     return analytics_service.get_dashboard_stats(db)
+
+
+@router.post("/seed")
+def seed_data(background_tasks: BackgroundTasks, db: Session = Depends(get_db)):
+    """Seed demo data for deployment. Run once after fresh deploy."""
+    from scripts.seed import seed
+    from scripts.seed_campaigns import seed_campaigns
+    try:
+        seed()
+        seed_campaigns()
+        return {"status": "success", "message": "Demo data seeded"}
+    except Exception as e:
+        return {"status": "error", "message": str(e)}
 
 
 @router.get("/insights")
