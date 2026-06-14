@@ -74,12 +74,3 @@ app.include_router(ws_routes.router, prefix="/ws", tags=["websocket"])
 @app.get("/health")
 def health():
     return {"status": "ok", "version": settings.APP_VERSION}
-
-
-# Serve Next.js static export — must be mounted last so API routes take priority
-import os
-from pathlib import Path
-_dist = Path(__file__).parent.parent / "dist"
-if _dist.exists():
-    from fastapi.staticfiles import StaticFiles
-    app.mount("/", StaticFiles(directory=str(_dist), html=True), name="frontend")
