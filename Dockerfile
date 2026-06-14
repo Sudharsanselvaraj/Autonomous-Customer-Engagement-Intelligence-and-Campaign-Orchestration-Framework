@@ -6,32 +6,29 @@ RUN npm install --legacy-peer-deps
 COPY frontend/ .
 RUN npm run build
 
-# Stage 2: Combined image
-FROM python:3.11-slim
+# Stage 2: Node runtime for Next.js + Python for FastAPI
+FROM node:20-slim AS runner
 WORKDIR /app
 
 RUN apt-get update && apt-get install -y --no-install-recommends \
-    gcc supervisor nginx curl && \
-    curl -fsSL https://deb.nodesource.com/setup_20.x | bash - && \
-    apt-get install -y nodejs && \
-    rm -rf /var/lib/apt/lists/*
+    python3 python3-pip python3-venv gcc nginx supervisor \
+    && rm -rf /var/lib/apt/lists/*
 
-# Python deps
+# Python venv
+RUN python3 -m venv /venv
+ENV PATH="/venv/bin:$PATH"
+
 COPY backend/requirements.txt ./
 RUN pip install --no-cache-dir -r requirements.txt
 
-# Backend source
 COPY backend/ ./backend/
 
-# Next.js standalone build
+# Next.js standalone
 COPY --from=frontend-builder /frontend/.next/standalone ./frontend/
 COPY --from=frontend-builder /frontend/.next/static ./frontend/.next/static
 COPY --from=frontend-builder /frontend/public ./frontend/public
 
-# nginx config: / → Next.js:3000, /api/ → FastAPI:8000, /ws/ → FastAPI:8000
 COPY nginx-combined.conf /etc/nginx/sites-enabled/default
-
-# supervisord config
 COPY supervisord.conf /etc/supervisord.conf
 
 EXPOSE 80
