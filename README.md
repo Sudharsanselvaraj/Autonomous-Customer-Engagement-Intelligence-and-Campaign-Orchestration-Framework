@@ -13,6 +13,7 @@
 [![PostgreSQL](https://img.shields.io/badge/PostgreSQL-15-336791?logo=postgresql&logoColor=white)](https://postgresql.org)
 [![Celery](https://img.shields.io/badge/Celery-5-37814A?logo=celery)](https://docs.celeryq.dev)
 [![Redis](https://img.shields.io/badge/Redis-7-DC382D?logo=redis&logoColor=white)](https://redis.io)
+[![Railway](https://img.shields.io/badge/Deployed%20on-Railway-0B0D0E?logo=railway)](https://railway.app)
 [![License: MIT](https://img.shields.io/badge/License-MIT-green)](LICENSE)
 
 </div>
@@ -33,11 +34,10 @@ The rest of the stack (two-service async delivery loop, materialized analytics, 
 
 | Surface | URL |
 |---------|-----|
-| **Frontend** | `https://aster-crm.vercel.app` |
-| **CRM API** | `https://aster-crm-api.onrender.com/docs` |
-| **Channel Simulator** | `https://aster-channel-sim.onrender.com/docs` |
+| **Frontend** | `https://ai-native-customer-intelligence-segmentation-and-production.up.railway.app` |
+| **CRM API Docs** | `https://ai-native-customer-intelligence-segmentation-and-production.up.railway.app/api/docs` |
 
-> **Seed data:** 10,000 customers · 50,000 orders · 7 pre-built smart segments — all generated with realistic demographics, purchase history, and multi-channel engagement patterns.
+> **Seed data:** 10,000 customers · 50,000 orders · 7 pre-built smart segments — all generated with realistic Indian demographics, purchase history, and multi-channel engagement patterns.
 
 ---
 
@@ -53,8 +53,7 @@ The rest of the stack (two-service async delivery loop, materialized analytics, 
 8. [Scalability Analysis](#scalability-analysis)
 9. [Running Locally](#running-locally)
 10. [Tests](#tests)
-11. [Deployment Guide](#deployment-guide)
-12. [Architecture Decision Records](#architecture-decision-records)
+11. [Architecture Decision Records](#architecture-decision-records)
 
 ---
 
@@ -78,7 +77,7 @@ The rest of the stack (two-service async delivery loop, materialized analytics, 
 │  Services: CustomerSvc · SegmentSvc · CampaignSvc · AISvc        │
 │  Workers:  CampaignWorker  ·  AnalyticsWorker                    │
 ├──────────────┬──────────────────────────┬────────────────────────┤
-│  PostgreSQL  │  Redis                   │  OpenRouter (Claude)   │
+│  PostgreSQL  │  Redis                   │  OpenRouter / Groq     │
 │  (8 tables)  │  Task broker + cache     │  NL→SQL · Campaign gen │
 │              │                          │  Copilot · Insights    │
 └──────────────┴──────────┬───────────────┴────────────────────────┘
@@ -100,11 +99,13 @@ The rest of the stack (two-service async delivery loop, materialized analytics, 
 
 **Seven Docker services:** `postgres` · `redis` · `crm` (FastAPI) · `crm-worker` (Celery) · `channel-simulator` (FastAPI) · `channel-worker` (Celery) · `frontend` (Next.js 15)
 
+All services deployed on **Railway** via Docker Compose.
+
 ---
 
 ## The AI-Native Core — Agentic Copilot
 
-This is where I spent the most design effort. The copilot is a Claude-powered agent with **six registered tools** that perform real CRM operations.
+This is where I spent the most design effort. The copilot (Ask Aster) is a Groq-powered agent with **six registered tools** that perform real CRM operations, with Gemini as automatic fallback on rate limits.
 
 ### Available Tools
 
@@ -119,7 +120,7 @@ This is where I spent the most design effort. The copilot is a Claude-powered ag
 
 ### Agentic Loop
 
-The copilot runs a **standard tool-calling loop** (up to 5 iterations). The `plan_workflow` tool is the only one that returns `requires_approval: true` — this is the human-in-the-loop gate before any multi-step irreversible action.
+The copilot runs a **standard tool-calling loop** (up to 3 iterations). The `plan_workflow` tool is the only one that returns `requires_approval: true` — this is the human-in-the-loop gate before any multi-step irreversible action.
 
 ```
 Marketer: "Re-engage beauty shoppers who haven't bought in 45 days"
@@ -147,7 +148,14 @@ AI: "Done. Campaign launched to 1,247 lapsed beauty shoppers via WhatsApp.
 
 ### NL → SQL Safety
 
-When creating segments from natural language, Claude generates **only a WHERE clause** — no SELECT, no DDL. The backend validates against a blocklist (`DROP`, `DELETE`, `UPDATE`, `INSERT`, `TRUNCATE`, `ALTER`, `CREATE`) before execution. Column names are locked to the `customers` and `orders` schema.
+When creating segments from natural language, the LLM generates **only a WHERE clause** — no SELECT, no DDL. The backend validates through four layers before execution:
+
+1. **DDL/DML blocklist** — rejects `DROP`, `DELETE`, `UPDATE`, `INSERT`, `TRUNCATE`, `ALTER`, `CREATE`
+2. **Semicolon rejection** — prevents statement chaining
+3. **Comment sequence rejection** — blocks `--`, `/*`, `*/`
+4. **Schema exfiltration rejection** — blocks `information_schema`, `pg_catalog`, `pg_class`
+
+The resulting clause is wrapped in a read-only CTE and executed against a schema-scoped query.
 
 ---
 
@@ -166,61 +174,57 @@ Marketer           Frontend           CRM API            Celery            Chann
     │                  │                  │                  │                  │── Celery task
     │                  │                  │◀─────────────────────────────────── │  (async)
     │                  │                  │  POST /receipts/webhook SENT        │
-    │                  │                  │── update analytics ────────────────▶│
+    │                  │                  │── update analytics                  │
     │                  │◀─ WS broadcast ──│  broadcast SENT                     │
     │  live dashboard  │                  │                  │                  │
-    │  updates         │                  │◀──────────────── │── DELIVERED ────▶│
-    │                  │◀─ WS broadcast ──│  DELIVERED       │                  │
+    │  updates         │                  │◀──────────────────── DELIVERED ────▶│
+    │                  │◀─ WS broadcast ──│  DELIVERED                          │
     │                  │                  │                  │   ... OPENED, CLICKED, CONVERTED
 ```
 
 **Idempotency:** Each communication has a `campaign_id:customer_id` idempotency key — prevents duplicate sends on Celery retry. Receipt events skip duplicates; status transitions are forward-only (PENDING → SENT → DELIVERED, never backwards).
+
+**Bulk webhook:** `POST /api/receipts/webhook/bulk` handles batch event ingestion with per-event failure isolation — one bad event doesn't abort the batch.
 
 ---
 
 ## Data Model
 
 ```
-customers ──────────────────────────────────────────────────────┐
-│ id · name · email (unique) · phone · city · gender · age      │
-│ created_at                                                    │
-│                                                               │
-│  1:N                                                          │
-▼                                                               │
-orders                    segments                              │
-│ id · customer_id (FK)   │ id · name · description             │
-│ amount · category       │ query_definition (JSON WHERE)       │ 
-│ purchase_date           │ estimated_size                      │
-│                         │ is_smart · created_at               │
-                          │                                     │
-                          │ 1:N                                 │
-                          ▼                                     │
-                       campaigns                                │
-                       │ id · name · description                │
-                       │ channel (enum)                         │
-                       │ segment_id (FK)                        │
-                       │ status (enum)                          │
-                       │ message_template                       │
-                       │ ai_generated · expected_*              │
-                       │ started_at · completed_at              │
-                       │                                        │
-                       │ 1:N                                    │
-                       ▼                                        │
-                    communications ◄────────────────────────────┘
-                    │ id · campaign_id (FK)     (customer_id FK)
-                    │ customer_id (FK)
-                    │ message · status (enum)
-                    │ channel · sent_at
-                    │ idempotency_key (unique)
-                    │
-                    ├──▶ communication_events
-                    │    │ id · communication_id (FK)
-                    │    │ event_type (SENT|DELIVERED|OPENED|READ|CLICKED|CONVERTED)
-                    │    │ event_time · metadata (JSON)
-                    │
-                    └──▶ channel_logs
-                         │ id · communication_id (FK)
-                         │ payload · response (JSON)
+customers
+│ id · name · email (unique) · phone · city · gender · age · created_at
+│
+│  1:N
+▼
+orders                         segments
+│ id · customer_id (FK)        │ id · name · description
+│ amount · category            │ query_definition (JSON WHERE clause)
+│ purchase_date                │ estimated_size · is_smart · created_at
+│ channel · status             │
+                               │ 1:N
+                               ▼
+                            campaigns
+                            │ id · name · description · channel (enum)
+                            │ segment_id (FK) · status (enum)
+                            │ message_template · ai_generated
+                            │ expected_open_rate · expected_conversion_rate
+                            │ started_at · completed_at
+                            │
+                            │ 1:N
+                            ▼
+                         communications ◄──── customers (FK)
+                         │ id · campaign_id (FK) · customer_id (FK)
+                         │ message · status (enum) · channel
+                         │ sent_at · idempotency_key (unique)
+                         │
+                         ├──▶ communication_events
+                         │    │ id · communication_id (FK)
+                         │    │ event_type (SENT|DELIVERED|OPENED|READ|CLICKED|CONVERTED)
+                         │    │ event_time · metadata (JSON)
+                         │
+                         └──▶ channel_logs
+                              │ id · communication_id (FK)
+                              │ payload · response (JSON)
 
 campaigns ──▶ campaign_analytics  (1:1 materialized row)
              │ campaign_id (FK, unique)
@@ -235,35 +239,30 @@ campaigns ──▶ campaign_analytics  (1:1 materialized row)
 ## Feature Walkthrough
 
 ### Customer & Order Ingestion
-REST API for individual records + CSV bulk import with validation. Paginated list view with search by name/email and filter by city. Customer detail page shows full order history and communication timeline.
+REST API for individual records + CSV bulk import with validation. Paginated list view with search by name/email and filter by city. VIP/Active/At Risk/Dormant/New tiering computed from purchase frequency and recency. Customer detail page shows full order history and communication timeline.
 
 ### AI Segment Builder
-Describe an audience in plain English — "high-value customers from Mumbai who bought electronics in the last 90 days and haven't opened our last campaign" — and AsterCRM:
-1. Sends it to Claude with schema context
-2. Receives a safe WHERE clause
-3. Runs `SELECT COUNT(*)` against the real DB
-4. Returns the estimated audience size and stores the segment
+Describe an audience in plain English — "high-value customers from Mumbai who bought electronics in the last 90 days" — and AsterCRM translates it to SQL, previews audience size and estimated revenue, and stores the segment with its query definition for full auditability.
 
 ### Campaign Engine
-- **AI Generate:** Give a campaign goal; Claude returns a structured JSON with name, message copy, recommended channel, and expected open/click rates
-- **Manual Create:** Full form with channel selector and message composer
-- **Launch:** Enqueues Celery task; transitions to RUNNING immediately
+- **AI Generate:** Give a campaign goal; the LLM returns a structured JSON with name, message copy, recommended channel, and expected engagement rates
+- **Templates:** Win-Back, VIP Loyalty, Festival Sale, Cart Recovery, Product Launch, Birthday Rewards — each with pre-computed benchmarks
+- **Launch:** Enqueues Celery task; transitions to RUNNING immediately; WebSocket streams real-time delivery events to the dashboard
 
 ### Real-Time Analytics Dashboard
-WebSocket connection to `/ws/campaigns/{id}` streams events as they arrive from the channel simulator. The dashboard updates delivery/open/click/conversion funnels in real time without polling.
+WebSocket connection to `/ws/campaigns/{id}` streams events as they arrive from the channel simulator. Dashboard updates delivery/open/click/conversion funnels without polling.
 
-### AI Insights
-`GET /api/analytics/insights` — Claude analyzes current KPIs and returns 3–5 prioritized, actionable recommendations (e.g., "WhatsApp CTR is 2.3× your email CTR but only 18% of campaigns use it — consider shifting the next re-engagement campaign").
+### Predictions
+Statistical revenue forecast (next 6 months, 95% confidence), churn risk segmentation, segment growth projections, and AI insight cards that surface the next best action.
 
 ### Mission Control
-Unified view of all active campaigns with live status, running analytics, and one-click abort.
+Unified command center with live campaign status, running KPIs, quick-action shortcuts, and a live alerts feed.
 
 ---
 
 ## API Reference
 
 ### Customers
-
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/customers` | Paginated list — search, city filter |
@@ -271,10 +270,8 @@ Unified view of all active campaigns with live status, running analytics, and on
 | `GET` | `/api/customers/{id}` | Customer + full order history |
 | `PATCH` | `/api/customers/{id}` | Update customer |
 | `POST` | `/api/customers/import/csv` | Bulk CSV import |
-| `GET` | `/api/customers/cities` | Available cities |
 
 ### Segments
-
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/segments` | List segments |
@@ -283,7 +280,6 @@ Unified view of all active campaigns with live status, running analytics, and on
 | `POST` | `/api/segments/{id}/refresh-size` | Recount audience |
 
 ### Campaigns
-
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/campaigns` | List with status filter |
@@ -292,30 +288,25 @@ Unified view of all active campaigns with live status, running analytics, and on
 | `GET` | `/api/campaigns/{id}` | Campaign + analytics |
 | `POST` | `/api/campaigns/{id}/launch` | Launch campaign |
 | `GET` | `/api/campaigns/{id}/analytics` | Full funnel metrics |
-| `POST` | `/api/campaigns/recommend-channel` | **AI channel recommendation** |
 
 ### Analytics
-
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `GET` | `/api/analytics/dashboard` | Global KPIs, trends, channel breakdown |
 | `GET` | `/api/analytics/insights` | **AI-generated actionable insights** |
 
 ### AI Copilot
-
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/copilot` | Multi-turn chat with tool-calling |
 
 ### Receipts (Channel Callbacks)
-
 | Method | Endpoint | Description |
 |--------|----------|-------------|
 | `POST` | `/api/receipts/webhook` | Single event callback |
-| `POST` | `/api/receipts/webhook/bulk` | Batch event ingestion |
+| `POST` | `/api/receipts/webhook/bulk` | Batch event ingestion with per-event isolation |
 
 ### WebSocket
-
 | Endpoint | Description |
 |----------|-------------|
 | `WS /ws/campaigns/{campaign_id}` | Live event stream for a campaign |
@@ -326,16 +317,13 @@ Unified view of all active campaigns with live status, running analytics, and on
 
 ### Why two separate services?
 
-Real channel providers (Twilio, MSG91, SendGrid) are **not synchronous**. You fire a request; they acknowledge receipt; delivery events trickle in asynchronously over minutes. Merging the simulator into the CRM would let me cheat — I'd have direct function calls instead of the actual async callback pattern. The two-service loop forces me to handle queuing, retries, and event ordering the way production code must.
+Real channel providers (Twilio, MSG91, SendGrid) are **not synchronous**. You fire a request; they acknowledge receipt; delivery events trickle in asynchronously over minutes. Merging the simulator into the CRM would let me cheat — I'd have direct function calls instead of the actual async callback pattern. The two-service loop forces proper queuing, retries, and event ordering the way production code must handle it.
 
 See [ADR-001](docs/adr/ADR-001-two-service-channel-architecture.md).
 
 ### Why Celery + Redis, not background threads?
 
-Campaign dispatch against 10,000 customers cannot block an HTTP request. Celery gives:
-- **Retry logic** — `max_retries=3, default_retry_delay=30` on the dispatch task
-- **Queue isolation** — `campaigns` and `analytics` are separate queues; a slow analytics recompute can't starve campaign dispatch
-- **Horizontal scaling** — add workers without touching application code
+Campaign dispatch against 10,000 customers cannot block an HTTP request. Celery gives retry logic (`max_retries=3, default_retry_delay=30`), queue isolation (`campaigns` and `analytics` are separate queues so a slow analytics recompute can't starve campaign dispatch), and horizontal scaling without touching application code.
 
 See [ADR-002](docs/adr/ADR-002-celery-redis-async-workers.md).
 
@@ -346,17 +334,13 @@ See [ADR-002](docs/adr/ADR-002-celery-redis-async-workers.md).
 
 ### Materialized analytics
 
-Rather than aggregating `communication_events` on every dashboard read (slow at scale), a Celery `update_analytics` task recomputes one `campaign_analytics` row per event. Dashboard reads are O(1) — a single JOIN. The tradeoff: a brief lag between event arrival and dashboard update (usually < 1 second).
+Rather than aggregating `communication_events` on every dashboard read, a Celery `update_analytics` task recomputes one `campaign_analytics` row per event. Dashboard reads are O(1) — a single lookup. Tradeoff: brief lag between event arrival and dashboard update (typically < 1 second).
 
 See [ADR-003](docs/adr/ADR-003-materialized-analytics-pattern.md).
 
-### Real-time with WebSockets, not polling
+### AI model routing
 
-Each campaign gets a `ConnectionManager` subscription. After `db.commit()` on a receipt event, the analytics worker broadcasts to all subscribers. Connections are pruned on disconnect. This approach works for a single CRM instance; at scale it would move to Redis pub/sub for cross-instance fanout.
-
-### AI model routing via OpenRouter
-
-All AI calls go through OpenRouter pointing at Claude. This lets me swap models (Sonnet ↔ Haiku) per endpoint without changing application code — Haiku for low-latency NL→SQL, Sonnet for copilot reasoning and campaign generation.
+Primary: Groq (Llama) via tool-calling loop. Fallback: Gemini on 429s. `_call_with_fallback` handles the switch transparently. This lets me swap models per endpoint without changing application code.
 
 See [ADR-004](docs/adr/ADR-004-ai-copilot-tool-calling.md).
 
@@ -365,39 +349,20 @@ See [ADR-004](docs/adr/ADR-004-ai-copilot-tool-calling.md).
 ## Scalability Analysis
 
 ### Current scope
-
-- 10,000 customers · 50,000 orders — all queries sub-second with existing indexes
-- Synchronous HTTP from CRM Celery worker to Channel Simulator — adequate for demo scale
+10,000 customers · 50,000 orders — all queries sub-second with existing composite indexes.
 
 ### Bottlenecks at 10× (100K customers, 50+ concurrent campaigns)
 
 | Bottleneck | Current approach | At 10× |
 |------------|-----------------|--------|
 | Campaign dispatch | Single Celery queue, HTTP per message | Partition by channel; replace HTTP with SQS/Kafka |
-| Channel simulator | Celery on single node | Scale simulator horizontally; one node per channel type |
-| Analytics recompute | Full aggregation on each event | Incremental Redis counters; flush to Postgres in batch |
-| NL→SQL latency | ~1.5s Claude API call | Cache identical queries 30-min TTL in Redis |
+| Analytics recompute | Full row update on each event | Incremental Redis counters; flush to Postgres in batch |
+| NL→SQL latency | ~1.5s LLM call | Cache identical queries 30-min TTL in Redis |
 | WebSocket broadcasting | In-memory `ConnectionManager` | Redis pub/sub for multi-instance fanout |
-| Receipt ingestion | Single webhook endpoint | Batch webhook + idempotent Kafka consumer |
+| Audience ID fetch | All IDs into Python memory | Cursor pagination with `LIMIT/OFFSET` batching |
 
-### Horizontal scaling path
-
-```
-Load Balancer
-     │
-     ├── CRM Instance 1 ──┐
-     ├── CRM Instance 2   ├── PostgreSQL primary + read replica(s)
-     └── CRM Instance 3 ──┘
-              │
-         Redis Pub/Sub ──▶ WebSocket broadcast across all instances
-              │
-         Celery Workers (auto-scale on queue depth via KEDA)
-              │
-         Channel Simulator Fleet
-         (dedicated node per channel type for independent failure isolation)
-```
-
-**What I consciously did not build** for this scope: rate limiting on the receipt webhook, dead-letter queues for failed Celery tasks, read replicas, or Redis pub/sub for WebSocket — all clear next steps at production scale.
+### What I consciously did not build
+Rate limiting on the receipt webhook, dead-letter queues for failed Celery tasks, read replicas, Redis pub/sub for WebSocket, and JWT auth — all clear next steps at production scale.
 
 ---
 
@@ -408,7 +373,7 @@ Load Balancer
 ```bash
 # 1. Configure
 cp backend/.env.example backend/.env
-# Set OPENROUTER_API_KEY in backend/.env
+# Set OPENROUTER_API_KEY and GROQ_API_KEY in backend/.env
 
 # 2. Start all 7 services
 docker compose up -d
@@ -432,33 +397,6 @@ docker compose exec crm python -m scripts.seed
 | `channel-worker` | — | Celery for delivery simulation |
 | `frontend` | 3000 | Next.js 15 |
 
-### Local Dev (no Docker)
-
-```bash
-# Prerequisites: PostgreSQL 15, Redis 7
-
-# Backend
-cd backend
-pip install -r requirements.txt
-cp .env.example .env   # set DATABASE_URL, REDIS_URL, OPENROUTER_API_KEY
-alembic upgrade head
-uvicorn app.main:app --reload --port 8000
-
-# Celery worker
-celery -A app.core.celery_app worker -Q campaigns,analytics --loglevel=info
-
-# Channel Simulator
-cd channel-simulator
-pip install -r requirements.txt
-uvicorn app.main:app --reload --port 8001
-celery -A app.tasks.celery_app worker --loglevel=info
-
-# Frontend
-cd frontend
-npm install
-NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
-```
-
 ### Environment Variables
 
 ```bash
@@ -466,7 +404,8 @@ NEXT_PUBLIC_API_URL=http://localhost:8000 npm run dev
 DATABASE_URL=postgresql://user:pass@localhost:5432/astercrm
 REDIS_URL=redis://localhost:6379/0
 OPENROUTER_API_KEY=sk-or-...
-OPENROUTER_BASE_URL=https://openrouter.ai/api/v1
+GROQ_API_KEY=gsk_...
+GEMINI_API_KEY=...
 CHANNEL_SIMULATOR_URL=http://localhost:8001
 CRM_WEBHOOK_URL=http://localhost:8000
 ```
@@ -492,24 +431,6 @@ pytest -v
 
 ---
 
-## Deployment Guide
-
-### Render + Neon + Vercel (recommended free tier path)
-
-| Service | Platform | Notes |
-|---------|----------|-------|
-| PostgreSQL | Neon | Copy connection string → `DATABASE_URL` |
-| Redis | Upstash or Render Redis add-on | |
-| CRM API | Render web service (from `backend/`) | Set all env vars |
-| CRM Worker | Render background worker | Same image; command: `celery -A app.core.celery_app worker -Q campaigns,analytics` |
-| Channel Simulator | Render web service (from `channel-simulator/`) | |
-| Channel Worker | Render background worker | Same image |
-| Frontend | Vercel | Set `NEXT_PUBLIC_API_URL` to CRM service URL |
-
-**Deploy order:** Postgres → Redis → CRM API (run `alembic upgrade head` in shell) → CRM Worker → Channel Simulator → Channel Worker → Frontend.
-
----
-
 ## Architecture Decision Records
 
 | ADR | Decision | Rationale |
@@ -521,34 +442,32 @@ pytest -v
 
 ---
 
+## Assignment Requirement → Implementation Mapping
+
+| # | Requirement | Implementation | Key Files |
+|---|------------|----------------|-----------|
+| 1 | Customer ingestion | `POST /api/customers` · CSV bulk import | `routes/customers.py` · `services/customer_service.py` |
+| 2 | Order ingestion | `POST /api/orders` · automatic aggregation | `routes/orders.py` · `models/models.py` |
+| 3 | Audience segmentation | NL→SQL via LLM with 4-layer safety validation | `services/segment_service.py` · `services/ai_service.py` |
+| 4 | AI-generated campaigns | LLM produces name, copy, channel, expected engagement | `routes/campaigns.py` · `services/ai_service.py` |
+| 5 | Campaign delivery | Celery → HTTP → Channel Simulator per customer | `workers/campaign_worker.py` · `channel-simulator/` |
+| 6 | Delivery receipts | Webhook → idempotency check → forward-only status guard | `routes/receipts.py` · `workers/analytics_worker.py` |
+| 7 | Campaign analytics | Materialized `CampaignAnalytics` updated per event | `models/models.py` · `workers/analytics_worker.py` |
+| 8 | Dashboard / reporting | Overview, Analytics, Predictions pages | `frontend/src/app/(crm)/` |
+| 9 | Real-time updates | WebSocket `/ws/campaigns/{id}` with auto-reconnect | `core/ws_manager.py` · `routes/websocket.py` |
+| 10 | AI Copilot | 6 tools, 3-iteration agentic loop, plan_workflow approval gate | `routes/ai_copilot.py` · `services/ai_service.py` |
+| 11 | Channel simulation | Separate FastAPI + Celery service, per-channel probability profiles | `channel-simulator/app/` |
+| 12 | Scalability clarity | Two-service async delivery, queue separation, materialized analytics, 4 ADRs | `docs/adr/` |
+
+---
+
 ## Tradeoffs I'd Change at Scale
 
 1. **Webhook ingestion** — currently a synchronous FastAPI endpoint. At high volume I'd front it with a Kafka topic and have the analytics worker consume idempotently.
 2. **NL→SQL caching** — identical queries hit the LLM every time. A 30-minute Redis cache keyed on the normalized query string would cut cost and latency significantly.
 3. **WebSocket fanout** — the in-memory `ConnectionManager` doesn't work across multiple CRM instances. Redis pub/sub is the obvious fix.
-4. **Campaign analytics** — I recompute the full row on each event. At volume, Redis HyperLogLog for deduplication + atomic counter increments would be faster, with a periodic flush to Postgres.
+4. **Audience ID fetch** — `get_audience_ids` loads all matching IDs into Python memory. At 100K+ rows this needs cursor-based batching.
 5. **Auth** — deliberately omitted for this assignment. Production would need JWT/session auth before the first PR merges.
-
----
-
-## Assignment Requirement → Implementation Mapping
-
-This table maps every requirement from the Xeno Engineering brief to the exact implementation in this codebase.
-
-| # | Assignment Requirement | Implementation | Key Files |
-|---|----------------------|----------------|-----------|
-| 1 | **Customer ingestion** — Accept customer data via API | `POST /api/customers` · Bulk CSV import (`POST /api/customers/bulk`) · CSV file upload (`POST /api/customers/import/csv`) | `backend/app/api/routes/customers.py` · `backend/app/services/customer_service.py` |
-| 2 | **Order ingestion** — Accept order/spend data | `POST /api/orders` · Bulk CSV import (`POST /api/orders/bulk`) · Automatic `total_spent` + `total_orders` aggregation via SQLAlchemy | `backend/app/api/routes/orders.py` · `backend/app/models/models.py` |
-| 3 | **Audience segmentation** — Define customer segments | Natural-language → SQL via Claude (`POST /api/segments/from-nl`); audience size + revenue preview before save; query stored as JSON for auditability | `backend/app/services/segment_service.py` · `backend/app/services/ai_service.py` |
-| 4 | **AI-generated campaigns** — Use LLM to generate campaign content | `POST /api/campaigns/generate` — Claude produces name, message template, channel recommendation, expected engagement + conversion; human reviews before `POST /api/campaigns` | `backend/app/api/routes/campaigns.py` · `backend/app/services/ai_service.py` |
-| 5 | **Campaign delivery** — Send messages to segment customers | `POST /api/campaigns/{id}/launch` → `dispatch_campaign.delay()` → Celery worker → HTTP POST to Channel Simulator per customer | `backend/app/workers/campaign_worker.py` · `channel-simulator/app/` |
-| 6 | **Delivery receipts / callbacks** — Track message status | Channel Simulator sends webhooks → `POST /api/receipts/webhook` → idempotency check → forward-only status guard (`SENT < DELIVERED < OPENED < CLICKED < CONVERTED`) → analytics update via Celery | `backend/app/api/routes/receipts.py` · `backend/app/workers/analytics_worker.py` |
-| 7 | **Campaign analytics** — Track engagement metrics | `CampaignAnalytics` table updated incrementally by `update_campaign_analytics.delay()`; dashboard reads pre-materialized row (O(1)); WebSocket broadcasts live to frontend | `backend/app/models/models.py` (CampaignAnalytics) · `backend/app/workers/analytics_worker.py` |
-| 8 | **Dashboard / reporting** — Visualise key metrics | Overview page with revenue trend, customer segments chart, recent activity feed, campaign performance; Analytics page with cohort retention, revenue by channel, city heat map | `frontend/src/app/(crm)/app/page.tsx` · `frontend/src/app/(crm)/analytics/page.tsx` |
-| 9 | **Real-time updates** — Live campaign progress | WebSocket endpoint `/ws/campaigns/{id}` backed by in-memory `ConnectionManager`; frontend auto-reconnects with 3s timeout, falls back to demo simulation | `backend/app/core/ws_manager.py` · `backend/app/api/routes/websocket.py` · `frontend/src/app/(crm)/campaigns/[id]/page.tsx` |
-| 10 | **AI Copilot (bonus)** — Natural language CRM actions | 6 tool-calling tools (create_segment, create_campaign, launch_campaign, get_analytics, search_customers, recommend_channel); 5-iteration agentic loop; `plan_workflow` human-approval gate before irreversible actions | `backend/app/api/routes/ai_copilot.py` · `backend/app/services/ai_service.py` |
-| 11 | **Channel simulation** | Separate FastAPI + Celery service; per-channel probability profiles (WhatsApp 92% delivered, Email 88%, SMS 95%); randomised SENT→DELIVERED→OPENED→READ→CLICKED→CONVERTED funnel with realistic delays | `channel-simulator/app/` |
-| 12 | **Scalability / design clarity** | Two-service async delivery; Celery queue separation (`campaigns` vs `analytics`); materialized analytics pattern; composite DB indexes; idempotency keys on Communications; structlog structured logging; 4 Architecture Decision Records | `docs/adr/` · `backend/app/models/models.py` |
 
 ---
 
