@@ -36,6 +36,7 @@ The rest of the stack (two-service async delivery loop, materialized analytics, 
 |---------|-----|
 | **Frontend** | `https://ai-native-customer-intelligence-segmentation-and-production.up.railway.app` |
 | **CRM API Docs** | `https://ai-native-customer-intelligence-segmentation-and-production.up.railway.app/api/docs` |
+| **Architecture Diagram** | `https://tinyurl.com/ArchitectureAstercrm` |
 
 > **Seed data:** 10,000 customers · 50,000 orders · 7 pre-built smart segments — all generated with realistic Indian demographics, purchase history, and multi-channel engagement patterns.
 
